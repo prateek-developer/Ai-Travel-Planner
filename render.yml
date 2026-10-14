@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: ai-tripplanner
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ai-tripplanner-db
+          property: connectionString
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: AVIATIONSTACK_API_KEY
+        sync: false
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: DEFAULT_ORIGIN_IATA
+        value: DEL
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_ENDPOINT
+        value: https://api.smith.langchain.com
+      - key: LANGSMITH_PROJECT
+        value: AI-TripPlanner
+
+databases:
+  - name: ai-tripplanner-db
+    plan: free
+    databaseName: travel_planner
+    user: travel_user

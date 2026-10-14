@@ -11,8 +11,8 @@ from typing import TypedDict, Annotated
 import operator
 import uuid
 
-import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -28,7 +28,7 @@ from tools.flight_tool import search_flights
 
 
 def get_database():
-    """Open a Postgres connection configured for LangGraph's PostgresSaver."""
+    """Open a connection pool Postgres connection configured for LangGraph's PostgresSaver."""
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         user = os.getenv("POSTGRES_USER", "travel_user")
@@ -38,8 +38,18 @@ def get_database():
         dbname = os.getenv("POSTGRES_DB", "travel_planner")
         db_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
 
-    return psycopg.connect(
-        db_url, autocommit=True, row_factory=dict_row, connect_timeout=10
+    return ConnectionPool(
+        conninfo=db_url,
+        min_size=1,
+        max_size=5,
+        kwargs={
+            "autocommit": True,
+            "row_factory": dict_row,
+            "prepare_threshold": 0,
+            "connect_timeout": 10,
+        },
+        check=ConnectionPool.check_connection,
+        open=True,
     )
 
 
@@ -208,9 +218,9 @@ graph.add_edge("final_agent", END)
 # =========================
 # PostgreSQL Checkpointer
 # =========================
-_conn = get_database()
+_pool = get_database()
 
-checkpointer = PostgresSaver(_conn)
+checkpointer = PostgresSaver(_pool)
 checkpointer.setup()
 
 travel_graph = graph.compile(checkpointer=checkpointer)
