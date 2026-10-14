@@ -14,8 +14,8 @@ os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 API_KEY = os.getenv("AVIATIONSTACK_API_KEY")
 
 # Default origin when user says only destination, e.g. "Japan trip"
-# Change this if your default location is not Bangladesh/Dhaka.
-DEFAULT_ORIGIN_IATA = os.getenv("DEFAULT_ORIGIN_IATA", "del")
+# Set DEFAULT_ORIGIN_IATA in .env to an airport code (e.g. DEL, KNU) or a city name.
+DEFAULT_ORIGIN_IATA = os.getenv("DEFAULT_ORIGIN_IATA", "DEL")
 
 
 BASE_URL = "https://api.aviationstack.com/v1/flights"
@@ -233,8 +233,11 @@ def resolve_location_to_iata(location: str):
 
     raw_location = location.strip()
 
-    # Direct IATA code
-    if re.fullmatch(r"[A-Za-z]{3}", raw_location):
+    # Direct IATA code (but "usa"/"uae" etc. are countries, not airports)
+    if (
+        re.fullmatch(r"[A-Za-z]{3}", raw_location)
+        and raw_location.lower() not in COUNTRY_ALIASES
+    ):
         code = raw_location.upper()
         if code in AIRPORTS:
             return code
@@ -272,10 +275,9 @@ def resolve_location_to_iata(location: str):
         if location_clean in name:
             score += 50
 
-        if "international" in name:
-            score += 10
-
         if score > 0:
+            if "international" in name:
+                score += 10
             city_matches.append((score, iata))
 
     if city_matches:
@@ -317,7 +319,29 @@ def find_location_mentions(query: str):
         if item not in unique_mentions:
             unique_mentions.append(item)
 
+    # Order by where each place appears in the query
+    unique_mentions.sort(key=lambda item: q.find(item))
+
     return unique_mentions
+
+
+def resolve_phrase(text: str):
+    """
+    Resolves the text captured after "from"/"to" into an IATA code.
+    Prefers known country/city names, otherwise uses only the words before
+    trailing filler like "with flights, hotels...".
+    """
+
+    mentions = find_location_mentions(text)
+    if mentions:
+        return resolve_location_to_iata(mentions[0])
+
+    phrase = re.split(
+        r"[,.!?]|\s(?:on|for|under|including|with|in|at|and|trip|flights?)\b",
+        text,
+    )[0]
+
+    return resolve_location_to_iata(phrase)
 
 
 def parse_route(query: str):
@@ -351,61 +375,54 @@ def parse_route(query: str):
         return None, None
 
     # Direct IATA code route: DAC to NRT
-    codes = re.findall(r"\b[A-Z]{3}\b", q)
+    # (skip country abbreviations like USA/UAE that are also airport codes)
+    codes = [
+        code for code in re.findall(r"\b[A-Z]{3}\b", q)
+        if code in AIRPORTS and code.lower() not in COUNTRY_ALIASES
+    ]
 
     if len(codes) >= 2:
-        dep = codes[0].upper()
-        arr = codes[1].upper()
-        return dep, arr
+        return codes[0], codes[1]
 
     # Pattern: from X to Y
-    match = re.search(
-        r"\bfrom\s+(.+?)\s+\bto\s+(.+?)(?:\s+(?:on|for|under|including|with|in|at)\b|[.!?]|$)",
-        q_lower,
-    )
+    match = re.search(r"\bfrom\s+(.+?)\s+to\s+(.+)", q_lower)
 
     if match:
-        origin_text = match.group(1)
-        dest_text = match.group(2)
-
-        dep_iata = resolve_location_to_iata(origin_text)
-        arr_iata = resolve_location_to_iata(dest_text)
-
-        return dep_iata, arr_iata
+        return resolve_phrase(match.group(1)), resolve_phrase(match.group(2))
 
     # Pattern: to Y from X
-    match = re.search(
-        r"\bto\s+(.+?)\s+\bfrom\s+(.+?)(?:\s+(?:on|for|under|including|with|in|at)\b|[.!?]|$)",
-        q_lower,
-    )
+    match = re.search(r"\bto\s+(.+?)\s+from\s+(.+)", q_lower)
 
     if match:
-        dest_text = match.group(1)
-        origin_text = match.group(2)
+        return resolve_phrase(match.group(2)), resolve_phrase(match.group(1))
 
-        dep_iata = resolve_location_to_iata(origin_text)
-        arr_iata = resolve_location_to_iata(dest_text)
+    mentions = find_location_mentions(q)
+
+    # Pattern: "Japan trip from X" / "flights from X"
+    match = re.search(r"\bfrom\s+(.+)", q_lower)
+
+    if match:
+        dep_iata = resolve_phrase(match.group(1))
+
+        # Destination is any other place mentioned in the query
+        arr_iata = None
+        for mention in mentions:
+            code = resolve_location_to_iata(mention)
+            if code and code != dep_iata:
+                arr_iata = code
+                break
 
         return dep_iata, arr_iata
 
-    # Pattern: flights from X
-    match = re.search(r"\bfrom\s+(.+?)(?:[.!?]|$)", q_lower)
-
-    if match:
-        origin_text = match.group(1)
-        dep_iata = resolve_location_to_iata(origin_text)
-        return dep_iata, None
-
     # Pattern: flights to X
-    match = re.search(r"\bto\s+(.+?)(?:[.!?]|$)", q_lower)
+    match = re.search(r"\bto\s+(.+)", q_lower)
 
     if match:
-        dest_text = match.group(1)
-        arr_iata = resolve_location_to_iata(dest_text)
-        return None, arr_iata
+        arr_iata = resolve_phrase(match.group(1))
+        if arr_iata:
+            return None, arr_iata
 
     # Fallback: find country/city mentions
-    mentions = find_location_mentions(q)
 
     if len(mentions) >= 2:
         dep_iata = resolve_location_to_iata(mentions[0])
@@ -414,7 +431,7 @@ def parse_route(query: str):
 
     if len(mentions) == 1:
         arr_iata = resolve_location_to_iata(mentions[0])
-        return DEFAULT_ORIGIN_IATA, arr_iata
+        return resolve_location_to_iata(DEFAULT_ORIGIN_IATA), arr_iata
 
     return None, None
 
